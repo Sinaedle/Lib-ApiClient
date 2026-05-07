@@ -14,7 +14,7 @@ Axios 기반의 범용 HTTP 클라이언트 라이브러리.
 ## 설치
 
 ```bash
-npm install git+https://github.com/Sinaedle/api-client.git#v1.0.0
+npm install git+https://github.com/Sinaedle/Lib-ApiClient.git#1.0.0
 ```
 
 ## 기본 사용법
