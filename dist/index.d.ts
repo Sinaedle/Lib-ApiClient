@@ -16,12 +16,25 @@ export declare interface ApiClientAuthConfig {
         statusCodes?: number[];
         /** Response error messages that should trigger token refresh */
         messages?: string[];
+        /** Server error codes that should trigger token refresh (e.g. TOKEN_EXPIRED) */
+        codes?: string[];
+        /**
+         * Server error codes that must never trigger token refresh (e.g. TOKEN_BLACKLISTED).
+         *
+         * Checked before every other condition. A revoked or blacklisted token cannot be
+         * recovered by refreshing, so attempting it only burns a round trip and can log
+         * the user out through onAuthFailure for the wrong reason.
+         */
+        excludeCodes?: string[];
     };
     /**
      * Custom override logic for token refresh decision.
      * If provided, refreshCondition will be ignored.
+     *
+     * Receives the normalized HttpError alongside the raw AxiosError so the server
+     * error code can be read directly instead of re-parsing the response body.
      */
-    shouldRefresh?: (error: AxiosError) => boolean;
+    shouldRefresh?: (error: AxiosError, httpError: HttpError) => boolean;
     /** Function to request new tokens using the refresh token */
     refreshRequest: (refreshToken: string, baseURL: string) => Promise<TokenPair>;
     /** Callback invoked after successful token refresh */
@@ -44,6 +57,14 @@ export declare interface ApiClientBaseConfig {
     retry?: RetryConfig;
     /** Debug logging (true = console.log, function = custom logger) */
     debug?: boolean | LogFn;
+    /**
+     * Overrides for locating error fields in a server response.
+     *
+     * Built-in extraction covers common framework shapes. Supply these when the
+     * backend puts its code or message somewhere else (e.g. inside a response
+     * envelope), so HttpError.code becomes usable for refresh conditions.
+     */
+    errorFields?: ErrorFieldExtractors;
 }
 
 /** Top-level configuration for creating an API client */
@@ -61,6 +82,9 @@ export declare interface ApiClientInstance {
     /** Client with authentication (null if auth config is not provided) */
     privateClient: AxiosInstance | null;
 }
+
+/** Axios error code assigned to canceled requests */
+export declare const CANCELED_ERROR_CODE = "ERR_CANCELED";
 
 /**
  * Creates configured Axios clients (public and optional private)
@@ -92,6 +116,48 @@ export declare interface ErrorContext {
 }
 
 /**
+ * Overrides for locating error fields in a server response.
+ *
+ * The built-in extractors cover common framework shapes, but a backend may put
+ * its error code somewhere they do not look (e.g. inside a response envelope).
+ * Supplying an extractor teaches the client where to look, so the code lands in
+ * HttpError.code and becomes usable for refresh conditions and consumer logic.
+ */
+export declare interface ErrorFieldExtractors {
+    /** Locates the server error code. Falls back to built-in extraction when it returns null */
+    extractErrorCode?: (data: unknown) => string | null;
+    /** Locates the server error message. Falls back to built-in extraction when it returns undefined */
+    extractErrorMessage?: (data: unknown) => string | undefined;
+}
+
+/**
+ * Extracts an error code from server response data (built-in).
+ *
+ * Covers common field variations across frameworks:
+ * - code, errorCode, error_code (general)
+ * - statusCode (NestJS)
+ * - type (RFC 7807 / ASP.NET)
+ */
+export declare function extractServerCode(data: unknown): string | null;
+
+/**
+ * Extracts a human-readable message from server response data (built-in).
+ *
+ * Covers common backend framework error formats:
+ * - General:      { message }, { error }, { msg }
+ * - Spring Boot:  { message, error }
+ * - NestJS:       { message: string | string[] }
+ * - Django / FastAPI (RFC 7807): { detail: string | object[] }
+ * - ASP.NET (RFC 7807): { title, detail }
+ * - Laravel:      { message, errors: { field: [...] } }
+ * - Nested:       { error: { message } }
+ *
+ * Exploration order is intentional — more specific fields first,
+ * broader fallbacks last.
+ */
+export declare function extractServerMessage(data: unknown): string | undefined;
+
+/**
  * Normalized HTTP error structure derived from AxiosError,
  * used for consistent error handling and logging
  */
@@ -104,6 +170,13 @@ export declare interface HttpError {
     message: string;
     /** Server-defined error code or Axios error code */
     code: string | null;
+    /**
+     * Whether the request was canceled by the caller (AbortController / CancelToken)
+     *
+     * A canceled request has no response and is not a failure, so consumers
+     * should skip their error handling (toasts, logging, loading state) for it.
+     */
+    isCanceled: boolean;
     /** Request URL (for quick access) */
     url: string;
     /** Final resolved request URL (for quick access) */
@@ -155,6 +228,18 @@ export declare interface HttpErrorResponse {
 }
 
 /**
+ * Determines whether an error was produced by request cancellation
+ * (AbortController.abort() or a CancelToken)
+ *
+ * A canceled request is not a failure. The caller abandoned or superseded it,
+ * so it must not be retried, refreshed, or reported through onError.
+ *
+ * Accepts both raw AxiosError and normalized HttpError, since cancellation is
+ * checked before and after normalization.
+ */
+export declare const isCanceledError: (error: unknown) => boolean;
+
+/**
  * Type guard to determine whether a caught error is an HttpError
  * and safely narrow its type
  */
@@ -173,10 +258,11 @@ export declare type LogFn = (message: string, data?: any) => void;
  *
  * Built-in extractors cover common backend frameworks
  * (Spring Boot, NestJS, Django, FastAPI, ASP.NET, Laravel, Express, etc.)
+ * and can be overridden per client via ErrorFieldExtractors.
  *
  * Ensures consistent error shape for downstream handling and logging
  */
-export declare const normalizeError: (error: unknown) => HttpError;
+export declare const normalizeError: (error: unknown, extractors?: ErrorFieldExtractors) => HttpError;
 
 /** Configuration for request retry behavior */
 export declare interface RetryConfig {

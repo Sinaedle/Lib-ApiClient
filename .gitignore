@@ -1,4 +1,33 @@
+# Dependencies
 node_modules
-*.local
 
+# Local env
+*.local
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Caches
+.cache
+.npm
+.eslintcache
+*.tsbuildinfo
+
+# Output of 'npm pack'
+*.tgz
+
+# IDE settings
 .vscode
+.idea
+
+# OS files
+.DS_Store
+Thumbs.db

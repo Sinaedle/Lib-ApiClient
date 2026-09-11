@@ -11,6 +11,7 @@ import { normalizeError } from '../utils/normalizeError';
  * - Normalizes any thrown error into HttpError
  * - Builds an ErrorContext with request/response metadata
  * - Invokes the onError callback (if provided) with the normalized error
+ * - Skips onError for canceled requests (see below)
  * - Always rejects with HttpError instead of raw AxiosError
  */
 export const setupErrorInterceptor = (
@@ -20,7 +21,15 @@ export const setupErrorInterceptor = (
 ) => {
   instance.interceptors.response.use(null, async (error: unknown) => {
     // Normalize any error into HttpError
-    const httpError = normalizeError(error);
+    const httpError = normalizeError(error, config.errorFields);
+
+    // A canceled request is not a failure: the caller superseded or abandoned it.
+    // Reporting it through onError would push abandoned requests into the
+    // consumer's error logging and session handling. Still rejects, so the
+    // caller's catch block runs and can tell cancellation apart via isCanceled.
+    if (httpError.isCanceled) {
+      return Promise.reject(httpError);
+    }
 
     // Build ErrorContext from normalized error and request config
     const context: ErrorContext = {
