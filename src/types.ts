@@ -1,4 +1,5 @@
 import type { AxiosError } from 'axios';
+import type { ErrorFieldExtractors } from './utils/serverErrorFields';
 
 // ─────────────────────────────────────────────
 // Client Configuration
@@ -18,6 +19,14 @@ export interface ApiClientBaseConfig {
   retry?: RetryConfig;
   /** Debug logging (true = console.log, function = custom logger) */
   debug?: boolean | LogFn;
+  /**
+   * Overrides for locating error fields in a server response.
+   *
+   * Built-in extraction covers common framework shapes. Supply these when the
+   * backend puts its code or message somewhere else (e.g. inside a response
+   * envelope), so HttpError.code becomes usable for refresh conditions.
+   */
+  errorFields?: ErrorFieldExtractors;
 }
 
 /** Configuration for request retry behavior */
@@ -46,12 +55,25 @@ export interface ApiClientAuthConfig {
     statusCodes?: number[];
     /** Response error messages that should trigger token refresh */
     messages?: string[];
+    /** Server error codes that should trigger token refresh (e.g. TOKEN_EXPIRED) */
+    codes?: string[];
+    /**
+     * Server error codes that must never trigger token refresh (e.g. TOKEN_BLACKLISTED).
+     *
+     * Checked before every other condition. A revoked or blacklisted token cannot be
+     * recovered by refreshing, so attempting it only burns a round trip and can log
+     * the user out through onAuthFailure for the wrong reason.
+     */
+    excludeCodes?: string[];
   };
   /**
    * Custom override logic for token refresh decision.
    * If provided, refreshCondition will be ignored.
+   *
+   * Receives the normalized HttpError alongside the raw AxiosError so the server
+   * error code can be read directly instead of re-parsing the response body.
    */
-  shouldRefresh?: (error: AxiosError) => boolean;
+  shouldRefresh?: (error: AxiosError, httpError: HttpError) => boolean;
 
   /** Function to request new tokens using the refresh token */
   refreshRequest: (refreshToken: string, baseURL: string) => Promise<TokenPair>;
@@ -153,6 +175,13 @@ export interface HttpError {
   message: string;
   /** Server-defined error code or Axios error code */
   code: string | null;
+  /**
+   * Whether the request was canceled by the caller (AbortController / CancelToken)
+   *
+   * A canceled request has no response and is not a failure, so consumers
+   * should skip their error handling (toasts, logging, loading state) for it.
+   */
+  isCanceled: boolean;
   /** Request URL (for quick access) */
   url: string;
   /** Final resolved request URL (for quick access) */

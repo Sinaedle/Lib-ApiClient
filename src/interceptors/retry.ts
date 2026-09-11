@@ -4,6 +4,7 @@ import type {
   InternalAxiosRequestConfig,
 } from 'axios';
 import type { RetryConfig, LogFn } from '../types';
+import { isCanceledError } from '../utils/isCanceledError';
 
 /**
  * Sets up a retry interceptor for failed requests
@@ -22,6 +23,13 @@ export const setupRetryInterceptor = (
     const originalRequest = error.config as InternalAxiosRequestConfig;
     const status = error.response?.status ?? 0;
     const currentCount = originalRequest?._retryCount ?? 0;
+
+    // Canceled requests are never retried. Cancellation leaves no response, so
+    // status falls back to 0 and a statusCodes entry of 0 would otherwise
+    // resurrect a request the caller already abandoned.
+    if (isCanceledError(error)) {
+      return Promise.reject(error);
+    }
 
     if (
       statusCodes.includes(status) &&

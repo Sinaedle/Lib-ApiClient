@@ -3,7 +3,10 @@ import type {
   AxiosError,
   InternalAxiosRequestConfig,
 } from 'axios';
-import type { ApiClientConfig, LogFn } from '../types';
+import type { ApiClientConfig, HttpError, LogFn } from '../types';
+import { isCanceledError } from '../utils/isCanceledError';
+import { normalizeError } from '../utils/normalizeError';
+import { resolveErrorMessage } from '../utils/serverErrorFields';
 
 /**
  * Sets up a token refresh interceptor for handling expired authentication
@@ -45,16 +48,22 @@ export const setupRefreshInterceptor = (
   };
 
   // Determine whether the request should trigger token refresh
-  const shouldRefresh = auth.shouldRefresh ?? ((error: AxiosError) => {
-    const status = error.response?.status;
-    const message = (error.response?.data as any)?.message;
+  const shouldRefresh = auth.shouldRefresh ?? ((error: AxiosError, httpError: HttpError) => {
+    const condition = auth.refreshCondition;
 
-    const codes = auth.refreshCondition?.statusCodes ?? [];
-    const messages = auth.refreshCondition?.messages ?? [];
+    // A revoked token cannot be refreshed, so exclusions win over every match below
+    const errorCode = httpError.code;
+    if (errorCode != null && (condition?.excludeCodes ?? []).includes(errorCode)) {
+      return false;
+    }
+
+    const status = error.response?.status;
+    const message = resolveErrorMessage(error.response?.data, config.errorFields);
 
     return (
-      (status != null && codes.includes(status)) ||
-      (message != null && messages.includes(message))
+      (status != null && (condition?.statusCodes ?? []).includes(status)) ||
+      (message != null && (condition?.messages ?? []).includes(message)) ||
+      (errorCode != null && (condition?.codes ?? []).includes(errorCode))
     );
   });
 
@@ -63,13 +72,17 @@ export const setupRefreshInterceptor = (
     const originalRequest = error.config as InternalAxiosRequestConfig;
 
     // Ignore canceled requests
-    if (error.code === 'ERR_CANCELED') {
+    if (isCanceledError(error)) {
       return Promise.reject(error);
     }
 
+    // Normalized once here so the refresh decision can read the server error code
+    // without re-parsing the response body (custom shouldRefresh gets it too)
+    const httpError = normalizeError(error, config.errorFields);
+
     // Skip if not eligible for refresh or already retried
     if (
-      !shouldRefresh(error) ||
+      !shouldRefresh(error, httpError) ||
       originalRequest?._alreadyRetried ||
       !originalRequest
     ) {

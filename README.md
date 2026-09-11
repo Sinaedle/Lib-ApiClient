@@ -1,4 +1,4 @@
-## @nyang96/api-client
+## @sinaedle/api-client
 
 Axios 기반의 범용 HTTP 클라이언트 라이브러리.
 
@@ -14,13 +14,16 @@ Axios 기반의 범용 HTTP 클라이언트 라이브러리.
 ## 설치
 
 ```bash
-npm install git+https://github.com/Sinaedle/Lib-ApiClient.git#1.0.0
+npm install git+https://github.com/Sinaedle/Lib-ApiClient.git#<version>
 ```
+
+`<version>`에는 사용할 [릴리스 태그](https://github.com/Sinaedle/Lib-ApiClient/tags)를 지정합니다 (예: `#1.2.0`).
+태그를 생략하면 기본 브랜치의 최신 커밋을 받게 되므로, 배포 환경에서는 태그를 고정하는 것을 권합니다.
 
 ## 기본 사용법
 
 ```typescript
-import { createApiClient } from '@nyang96/api-client';
+import { createApiClient } from '@sinaedle/api-client';
 
 const { publicClient, privateClient } = createApiClient({
   baseURL: 'https://api.example.com',
@@ -85,6 +88,7 @@ privateClient!.get('/api/users');
 | `auth` | `ApiClientAuthConfig` | — | 인증 설정. 제공 시 privateClient 생성 |
 | `onError` | `(error, context) => void` | — | 에러 발생 시 공통 후처리 (로깅 등) |
 | `debug` | `boolean \| LogFn` | `false` | `true`: console.log, 함수: 커스텀 로거 |
+| `errorFields` | `ErrorFieldExtractors` | — | 에러 코드/메시지 추출 방식 오버라이드 |
 
 ### RetryConfig
 
@@ -100,11 +104,56 @@ privateClient!.get('/api/users');
 |---|---|---|
 | `getAccessToken` | `() => string \| null \| Promise` | 현재 access token 반환 |
 | `getRefreshToken` | `() => string \| null \| Promise` | 현재 refresh token 반환 |
-| `refreshCondition` | `{ statusCodes?, messages? }` | 리프레시 트리거 조건 (기본 매칭) |
-| `shouldRefresh` | `(error: AxiosError) => boolean` | 커스텀 리프레시 판단 로직. 제공 시 `refreshCondition` 무시 |
+| `refreshCondition` | `{ statusCodes?, messages?, codes?, excludeCodes? }` | 리프레시 트리거 조건 (기본 매칭) |
+| `shouldRefresh` | `(error: AxiosError, httpError: HttpError) => boolean` | 커스텀 리프레시 판단 로직. 제공 시 `refreshCondition` 무시 |
 | `refreshRequest` | `(refreshToken, baseURL) => Promise<TokenPair>` | 토큰 갱신 요청 |
 | `onTokenRefreshed` | `(tokens: TokenPair) => void` | 갱신 성공 후 토큰 저장 |
 | `onAuthFailure` | `() => void` | 갱신 실패 시 처리 (로그아웃 등) |
+
+#### refreshCondition
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `statusCodes` | `number[]` | 이 상태 코드면 리프레시 |
+| `messages` | `string[]` | 이 메시지면 리프레시 |
+| `codes` | `string[]` | 이 서버 에러 코드면 리프레시 (예: `TOKEN_EXPIRED`) |
+| `excludeCodes` | `string[]` | 이 코드면 리프레시하지 않음 (예: `TOKEN_BLACKLISTED`) |
+
+`excludeCodes`는 다른 모든 조건보다 먼저 평가됩니다.
+
+```typescript
+auth: {
+  refreshCondition: {
+    statusCodes: [401, 426],
+    codes: ['TOKEN_EXPIRED'],
+    excludeCodes: ['TOKEN_BLACKLISTED'],
+  },
+  // ...
+}
+```
+
+`codes`/`excludeCodes`는 `HttpError.code`와 대조합니다. 서버가 에러 코드를 빌트인 추출이 찾지 못하는 위치에 담는다면 `errorFields`로 위치를 알려주세요.
+
+---
+
+## 에러 필드 추출
+
+응답에서 에러 코드와 메시지를 찾는 빌트인 규칙은 주요 프레임워크 형태를 커버합니다. 하지만 자체 응답 envelope을 쓰는 경우처럼 빌트인이 찾지 못하는 위치에 담겨 있다면 `errorFields`로 알려줄 수 있습니다.
+
+```typescript
+// 서버가 { isSuccess: false, message, data: "TOKEN_EXPIRED" } 형태로 응답하는 경우
+createApiClient({
+  baseURL,
+  errorFields: {
+    extractErrorCode: (data) => {
+      const code = (data as { data?: unknown })?.data;
+      return typeof code === 'string' ? code : null;
+    },
+  },
+});
+```
+
+추출기가 `null`/`undefined`를 반환하면 빌트인 규칙으로 폴백합니다. 여기서 뽑힌 값이 `HttpError.code` / `HttpError.message`에 들어가고, `refreshCondition`의 `codes`/`excludeCodes` 매칭에도 그대로 쓰입니다. 즉 **추출 규칙을 한 번만 알려주면 리프레시 판단과 소비 측 에러 처리가 같은 값을 보게 됩니다.**
 
 ---
 
@@ -120,6 +169,7 @@ interface HttpError {
   statusText: string;           // HTTP 상태 텍스트
   message: string;              // 서버 메시지 (빌트인 추출) 또는 에러 메시지
   code: string | null;          // 서버 에러 코드 → Axios 에러 코드 순 폴백
+  isCanceled: boolean;          // 요청 취소 여부 (AbortController / CancelToken)
   url: string;                  // 요청 URL
   fullURL: string;              // baseURL + url + params 결합된 전체 URL
   method: string;               // HTTP 메서드 (대문자)
@@ -130,6 +180,38 @@ interface HttpError {
   originalError: unknown;       // 원본 에러 객체
 }
 ```
+
+### 요청 취소
+
+취소된 요청은 **실패가 아닙니다.** 호출 측이 스스로 중단했거나 더 새로운 요청으로 대체한 것이므로, 라이브러리는 취소를 에러 파이프라인에서 제외합니다.
+
+| 인터셉터 | 취소 시 동작 |
+| --- | --- |
+| retry | 재시도하지 않음 |
+| refresh | 토큰 갱신을 트리거하지 않음 |
+| errorHandler | `onError` 콜백을 호출하지 않음 |
+
+reject 자체는 그대로 일어나므로 호출 측 catch 블록은 실행됩니다. `isCanceled`로 구분해 후처리를 건너뛰세요.
+
+```typescript
+const controller = new AbortController();
+
+try {
+  await client.get('/api/items', { params, signal: controller.signal });
+} catch (error) {
+  if (isHttpError(error) && error.isCanceled) {
+    // 대체된 요청 — 토스트/로깅/로딩 해제 모두 건너뛴다
+    return;
+  }
+  showError(error);
+}
+
+controller.abort();
+```
+
+목록 조회처럼 **더 새로운 요청이 이전 요청을 무의미하게 만드는** 경우에 쓰입니다. 정렬을 바꾸는 순간 진행 중이던 이전 정렬의 응답이 뒤늦게 도착해 새 결과를 덮어쓰는 문제를 막습니다.
+
+> 어떤 요청이 어떤 요청을 대체하는지는 화면 구조를 알아야 판단할 수 있으므로(같은 엔드포인트를 두 컴포넌트가 동시에 쓰는 경우가 있음) 라이브러리는 `signal`을 자동으로 주입하거나 임의로 취소하지 않습니다. 취소 시점은 호출 측이 결정합니다.
 
 ### 빌트인 메시지 추출
 
@@ -150,7 +232,7 @@ interface HttpError {
 타입 가드로 catch 블록에서 안전하게 타입을 좁힐 수 있습니다:
 
 ```typescript
-import { isHttpError } from '@nyang96/api-client';
+import { isHttpError } from '@sinaedle/api-client';
 
 try {
   await privateClient!.get('/api/resource');
@@ -167,45 +249,63 @@ try {
 라이브러리는 `HttpError`까지만 정규화하고, 프로젝트별 에러 형태 변환은 소비 측에서 처리합니다:
 
 ```typescript
-import { isHttpError, type HttpError } from '@nyang96/api-client';
+import { isHttpError } from '@sinaedle/api-client';
 
 interface ApiErrorResponse {
   isSuccess: false;
   message: string;
-  data: { code: string; status: string; statusCode: number; message: string };
+  data: string;
   timestamp: string;
 }
 
+// 프로젝트 쪽 폴백 (라이브러리와 무관)
+const getUnknownErrorResponse = (): ApiErrorResponse => ({
+  isSuccess: false,
+  message: '알 수 없는 오류입니다.',
+  data: 'UNKNOWN',
+  timestamp: new Date().toISOString(),
+});
+
 /**
  * HttpError → 프로젝트 에러 형태로 변환
+ * - 취소된 요청은 실패가 아니므로 메시지를 만들지 않는다
  * - 서버 커스텀 응답이면 그대로 반환
  * - 프레임워크/네트워크 에러면 HttpError에서 매핑
  */
 export function toApiErrorResponse(error: unknown): ApiErrorResponse {
-  if (isHttpError(error)) {
-    // 서버 커스텀 응답 우선
-    const data = error.response?.data as any;
-    if (typeof data?.isSuccess === 'boolean') {
-      return data as ApiErrorResponse;
-    }
+  if (!isHttpError(error)) {
+    return getUnknownErrorResponse();
+  }
 
-    // 프레임워크/네트워크 에러 → 매핑
+  // 취소는 더 새로운 요청으로 대체된 것이지 실패가 아니다.
+  // 여기서 메시지를 만들면 정렬을 바꿀 때마다 사용자에게 에러가 노출된다.
+  if (error.isCanceled) {
     return {
       isSuccess: false,
-      message: error.message || '알 수 없는 오류입니다.',
-      data: {
-        code: error.code ?? '000',
-        status: error.statusText || 'UNKNOWN',
-        statusCode: error.status ?? 999,
-        message: error.message || 'UNKNOWN ERROR',
-      },
+      message: '',
+      data: 'CANCELED',
       timestamp: error.timestamp,
     };
   }
 
-  return getUnknownErrorResponse();
+  // 서버 커스텀 응답 우선
+  const data = error.response?.data as any;
+  if (typeof data?.isSuccess === 'boolean') {
+    return data as ApiErrorResponse;
+  }
+
+  // 프레임워크/네트워크 에러 → 매핑
+  // statusText 는 응답이 없을 때 비어 있으므로 판별 가능한 code 를 쓴다
+  return {
+    isSuccess: false,
+    message: error.message || '알 수 없는 오류입니다.',
+    data: error.code ?? 'UNKNOWN',
+    timestamp: error.timestamp,
+  };
 }
 ```
+
+호출 측은 `data === 'CANCELED'` 대신 `isCanceled`를 그대로 들고 가도 됩니다. 실패 출처를 여러 갈래로 구분해야 한다면 변환 결과에 `kind` 같은 판별 필드를 두는 편이 문자열 센티넬보다 낫습니다.
 
 ---
 
@@ -228,6 +328,8 @@ createApiClient({
 ```
 
 `onError`는 에러를 가로채지 않습니다. 콜백 실행 후 `HttpError`는 그대로 reject되어 호출 측 catch 블록에 전달됩니다.
+
+단, **취소된 요청에는 호출되지 않습니다.** 중단된 요청이 에러 로깅이나 세션 처리로 흘러들어가지 않게 하기 위함입니다. reject는 그대로 일어나므로 호출 측에서는 `isCanceled`로 확인할 수 있습니다.
 
 ---
 
@@ -345,6 +447,10 @@ Token refresh failed                    ← 리프레시 실패
 export { createApiClient }    // 클라이언트 팩토리
 export { normalizeError }     // 에러 정규화 (단독 사용 가능)
 export { isHttpError }        // HttpError 타입 가드
+export { isCanceledError }    // 취소 여부 판별 (AxiosError / HttpError 모두 허용)
+export { extractServerCode }    // 빌트인 에러 코드 추출
+export { extractServerMessage } // 빌트인 에러 메시지 추출
+export { CANCELED_ERROR_CODE } // 'ERR_CANCELED'
 
 // 타입
 export type {
@@ -356,6 +462,7 @@ export type {
   RetryConfig,
   LogFn,
   ErrorContext,
+  ErrorFieldExtractors,
   HttpError,
   HttpErrorRequest,
   HttpErrorResponse,
